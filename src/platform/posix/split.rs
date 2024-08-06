@@ -81,25 +81,26 @@ impl Reader {
         const STACK_BUF_LEN: usize = crate::DEFAULT_MTU as usize + PIL;
         let in_buf_len = in_buf.len() + self.offset;
 
+        let mut helper = |local_buf: &mut [u8]| {
+            let either_buf = if self.offset != 0 {
+                &mut *local_buf
+            } else {
+                &mut *in_buf
+            };
+            let amount = self.fd.read(either_buf)?;
+            if self.offset != 0 {
+                in_buf.put_slice(&local_buf[self.offset..amount]);
+            }
+            Ok(amount - self.offset)
+        };
         // The following logic is to prevent dynamically allocating Vec on every recv
         // As long as the MTU is set to value lesser than 1500, this api uses `stack_buf`
         // and avoids `Vec` allocation
-        let local_buf = if in_buf_len > STACK_BUF_LEN && self.offset != 0 {
-            &mut vec![0u8; in_buf_len][..]
+        if in_buf_len > STACK_BUF_LEN && self.offset != 0 {
+            helper(&mut vec![0u8; in_buf_len][..])
         } else {
-            &mut [0u8; STACK_BUF_LEN]
-        };
-
-        let either_buf = if self.offset != 0 {
-            &mut *local_buf
-        } else {
-            &mut *in_buf
-        };
-        let amount = self.fd.read(either_buf)?;
-        if self.offset != 0 {
-            in_buf.put_slice(&local_buf[self.offset..amount]);
+            helper(&mut [0u8; STACK_BUF_LEN])
         }
-        Ok(amount - self.offset)
     }
 }
 
@@ -146,29 +147,31 @@ impl Writer {
         const STACK_BUF_LEN: usize = crate::DEFAULT_MTU as usize + PIL;
         let in_buf_len = in_buf.len() + self.offset;
 
+        let helper = |local_buf: &mut [u8]| {
+            let either_buf = if self.offset != 0 {
+                let ipv6 = is_ipv6(in_buf)?;
+                if let Some(header) = generate_packet_information(true, ipv6) {
+                    (&mut local_buf[..self.offset]).put_slice(header.as_ref());
+                    (&mut local_buf[self.offset..in_buf_len]).put_slice(in_buf);
+                    local_buf
+                } else {
+                    in_buf
+                }
+            } else {
+                in_buf
+            };
+            let amount = self.fd.write(either_buf)?;
+            Ok(amount - self.offset)
+        };
+
         // The following logic is to prevent dynamically allocating Vec on every send
         // As long as the MTU is set to value lesser than 1500, this api uses `stack_buf`
         // and avoids `Vec` allocation
-        let local_buf = if in_buf_len > STACK_BUF_LEN && self.offset != 0 {
-            &mut vec![0_u8; in_buf_len][..]
+        if in_buf_len > STACK_BUF_LEN && self.offset != 0 {
+            helper(&mut vec![0_u8; in_buf_len][..])
         } else {
-            &mut [0_u8; STACK_BUF_LEN]
-        };
-
-        let either_buf = if self.offset != 0 {
-            let ipv6 = is_ipv6(in_buf)?;
-            if let Some(header) = generate_packet_information(true, ipv6) {
-                (&mut local_buf[..self.offset]).put_slice(header.as_ref());
-                (&mut local_buf[self.offset..in_buf_len]).put_slice(in_buf);
-                local_buf
-            } else {
-                in_buf
-            }
-        } else {
-            in_buf
-        };
-        let amount = self.fd.write(either_buf)?;
-        Ok(amount - self.offset)
+            helper(&mut [0_u8; STACK_BUF_LEN])
+        }
     }
 }
 
