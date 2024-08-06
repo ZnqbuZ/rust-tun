@@ -32,6 +32,7 @@ pub struct PlatformConfig {
     pub(crate) wintun_file: OsString,
     #[cfg(feature = "wintun-dns")]
     pub(crate) dns_servers: Option<Vec<IpAddr>>,
+    pub(crate) ring_cap: Option<u32>,
 }
 
 impl Default for PlatformConfig {
@@ -41,6 +42,7 @@ impl Default for PlatformConfig {
             wintun_file: "wintun.dll".into(),
             #[cfg(feature = "wintun-dns")]
             dns_servers: None,
+            ring_cap: None,
         }
     }
 }
@@ -63,6 +65,18 @@ impl PlatformConfig {
     #[cfg(feature = "wintun-dns")]
     pub fn dns_servers(&mut self, dns_servers: &[IpAddr]) {
         self.dns_servers = Some(dns_servers.to_vec());
+    }
+
+    pub fn min_ring_cap(&self) -> u32 {
+        wintun::MIN_RING_CAPACITY
+    }
+
+    pub fn max_ring_cap(&self) -> u32 {
+        wintun::MAX_RING_CAPACITY
+    }
+
+    pub fn ring_cap(&mut self, ring_cap: Option<u32>) {
+        self.ring_cap = ring_cap;
     }
 }
 

@@ -29,6 +29,7 @@ use crate::platform::windows::verify_dll_file::{
 pub struct Device {
     pub(crate) tun: Tun,
     mtu: u16,
+    name: String,
 }
 
 impl Device {
@@ -69,13 +70,19 @@ impl Device {
         }
         let mtu = config.mtu.unwrap_or(crate::DEFAULT_MTU);
 
-        let session = adapter.start_session(wintun::MAX_RING_CAPACITY)?;
+        let session = adapter.start_session(
+            config
+                .platform_config
+                .ring_cap
+                .unwrap_or(wintun::MAX_RING_CAPACITY),
+        )?;
 
         let mut device = Device {
             tun: Tun {
                 session: Arc::new(session),
             },
             mtu,
+            name: tun_name.to_string(),
         };
 
         // This is not needed since we use netsh to set the address.
@@ -130,11 +137,15 @@ impl AsMut<dyn AbstractDevice + 'static> for Device {
 
 impl AbstractDevice for Device {
     fn tun_name(&self) -> Result<String> {
-        Ok(self.tun.session.get_adapter().get_name()?)
+        match self.tun.session.get_adapter().get_name() {
+            Ok(name) => Ok(name),
+            Err(_) => Ok(self.name.clone()),
+        }
     }
 
     fn set_tun_name(&mut self, value: &str) -> Result<()> {
         self.tun.session.get_adapter().set_name(value)?;
+        self.name = value.to_string();
         Ok(())
     }
 

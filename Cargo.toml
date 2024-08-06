@@ -1,13 +1,13 @@
 [package]
-name = "tun2"
+name = "tun-easytier"
 version = "2.0.5"
 edition = "2021"
-authors = ["meh. <meh@schizofreni.co>", "@ssrlive"]
+authors = ["meh. <meh@schizofreni.co>", "@ssrlive", "sijie.sun <sunsijie@buaa.edu.cn>"]
 license = "WTFPL"
 description = "TUN device creation and handling."
-repository = "https://github.com/ssrlive/rust-tun"
+repository = "https://github.com/EasyTier/rust-tun"
 keywords = ["tun", "network", "tunnel", "bindings"]
-rust-version = "1.79"
+rust-version = "1.75"
 
 [lib]
 crate-type = ["staticlib", "cdylib", "lib"]
