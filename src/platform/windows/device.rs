@@ -56,18 +56,22 @@ impl Device {
             Err(_) => wintun::Adapter::create(&wintun, tun_name, tun_name, guid)?,
         };
 
-        let address = config
-            .address
-            .unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 2)));
-        let mask = config
-            .netmask
-            .unwrap_or(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)));
-        let gateway = config.destination.map(IpAddr::from);
-        adapter.set_network_addresses_tuple(address, mask, gateway)?;
-        #[cfg(feature = "wintun-dns")]
-        if let Some(dns_servers) = &config.platform_config.dns_servers {
-            adapter.set_dns_servers(dns_servers)?;
+        // on win7 guid will not be correctly assigned, user should skip the config step.
+        if !config.platform_config.skip_config && adapter.get_name().is_ok() {
+            let address = config
+                .address
+                .unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 2)));
+            let mask = config
+                .netmask
+                .unwrap_or(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)));
+            let gateway = config.destination.map(IpAddr::from);
+            adapter.set_network_addresses_tuple(address, mask, gateway)?;
+            #[cfg(feature = "wintun-dns")]
+            if let Some(dns_servers) = &config.platform_config.dns_servers {
+                adapter.set_dns_servers(dns_servers)?;
+            }
         }
+
         let mtu = config.mtu.unwrap_or(crate::DEFAULT_MTU);
 
         let session = adapter.start_session(
@@ -85,8 +89,10 @@ impl Device {
             name: tun_name.to_string(),
         };
 
-        // This is not needed since we use netsh to set the address.
-        device.configure(config)?;
+        if !config.platform_config.skip_config && adapter.get_name().is_ok() {
+            // This is not needed since we use netsh to set the address.
+            device.configure(config)?;
+        }
 
         Ok(device)
     }

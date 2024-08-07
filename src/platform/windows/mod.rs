@@ -33,6 +33,7 @@ pub struct PlatformConfig {
     #[cfg(feature = "wintun-dns")]
     pub(crate) dns_servers: Option<Vec<IpAddr>>,
     pub(crate) ring_cap: Option<u32>,
+    pub(crate) skip_config: bool,
 }
 
 impl Default for PlatformConfig {
@@ -43,6 +44,7 @@ impl Default for PlatformConfig {
             #[cfg(feature = "wintun-dns")]
             dns_servers: None,
             ring_cap: None,
+            skip_config: false,
         }
     }
 }
@@ -77,6 +79,10 @@ impl PlatformConfig {
 
     pub fn ring_cap(&mut self, ring_cap: Option<u32>) {
         self.ring_cap = ring_cap;
+    }
+
+    pub fn skip_config(&mut self, skip_config: bool) {
+        self.skip_config = skip_config;
     }
 }
 
