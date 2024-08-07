@@ -1,6 +1,6 @@
 [package]
 name = "tun-easytier"
-version = "2.0.5"
+version = "1.0.0"
 edition = "2021"
 authors = ["meh. <meh@schizofreni.co>", "@ssrlive", "sijie.sun <sunsijie@buaa.edu.cn>"]
 license = "WTFPL"
