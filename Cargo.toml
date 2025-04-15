@@ -72,3 +72,6 @@ required-features = ["async"]
 [[example]]
 name = "ping-tun"
 required-features = ["async"]
+
+[build-dependencies]
+napi-build-ohos = "0.0.3"

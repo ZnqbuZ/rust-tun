@@ -14,24 +14,96 @@
 
 //! Bindings to internal Linux stuff.
 
-use libc::{c_int, ifreq};
-use nix::{ioctl_read_bad, ioctl_write_ptr, ioctl_write_ptr_bad};
+use libc::{c_int, ifreq, ioctl, Ioctl};
 
-ioctl_read_bad!(siocgifflags, 0x8913, ifreq);
-ioctl_write_ptr_bad!(siocsifflags, 0x8914, ifreq);
-ioctl_read_bad!(siocgifaddr, 0x8915, ifreq);
-ioctl_write_ptr_bad!(siocsifaddr, 0x8916, ifreq);
-ioctl_read_bad!(siocgifdstaddr, 0x8917, ifreq);
-ioctl_write_ptr_bad!(siocsifdstaddr, 0x8918, ifreq);
-ioctl_read_bad!(siocgifbrdaddr, 0x8919, ifreq);
-ioctl_write_ptr_bad!(siocsifbrdaddr, 0x891a, ifreq);
-ioctl_read_bad!(siocgifnetmask, 0x891b, ifreq);
-ioctl_write_ptr_bad!(siocsifnetmask, 0x891c, ifreq);
-ioctl_read_bad!(siocgifmtu, 0x8921, ifreq);
-ioctl_write_ptr_bad!(siocsifmtu, 0x8922, ifreq);
-ioctl_write_ptr_bad!(siocsifname, 0x8923, ifreq);
+// 定义 SIOCGIF* 和 SIOCSIF* 命令号
+const SIOCGIFFLAGS: Ioctl = 0x8913;
+const SIOCSIFFLAGS: Ioctl = 0x8914;
+const SIOCGIFADDR: Ioctl = 0x8915;
+const SIOCSIFADDR: Ioctl = 0x8916;
+const SIOCGIFDSTADDR: Ioctl = 0x8917;
+const SIOCSIFDSTADDR: Ioctl = 0x8918;
+const SIOCGIFBRDADDR: Ioctl = 0x8919;
+const SIOCSIFBRDADDR: Ioctl = 0x891a;
+const SIOCGIFNETMASK: Ioctl = 0x891b;
+const SIOCSIFNETMASK: Ioctl = 0x891c;
+const SIOCGIFMTU: Ioctl = 0x8921;
+const SIOCSIFMTU: Ioctl = 0x8922;
+const SIOCSIFNAME: Ioctl = 0x8923;
 
-ioctl_write_ptr!(tunsetiff, b'T', 202, c_int);
-ioctl_write_ptr!(tunsetpersist, b'T', 203, c_int);
-ioctl_write_ptr!(tunsetowner, b'T', 204, c_int);
-ioctl_write_ptr!(tunsetgroup, b'T', 206, c_int);
+// 定义 TUNSET* 命令号
+const TUNSETIFF: Ioctl = ((b'T' as Ioctl) << 8) | 202;
+const TUNSETPERSIST: Ioctl = ((b'T' as Ioctl) << 8) | 203;
+const TUNSETOWNER: Ioctl = ((b'T' as Ioctl) << 8) | 204;
+const TUNSETGROUP: Ioctl = ((b'T' as Ioctl) << 8) | 206;
+
+// SIOCGIF* 读取函数
+unsafe fn siocgifflags(fd: c_int, req: *mut ifreq) -> c_int {
+    ioctl(fd, SIOCGIFFLAGS, req)
+}
+
+unsafe fn siocgifaddr(fd: c_int, req: *mut ifreq) -> c_int {
+    ioctl(fd, SIOCGIFADDR, req)
+}
+
+unsafe fn siocgifdstaddr(fd: c_int, req: *mut ifreq) -> c_int {
+    ioctl(fd, SIOCGIFDSTADDR, req)
+}
+
+unsafe fn siocgifbrdaddr(fd: c_int, req: *mut ifreq) -> c_int {
+    ioctl(fd, SIOCGIFBRDADDR, req)
+}
+
+unsafe fn siocgifnetmask(fd: c_int, req: *mut ifreq) -> c_int {
+    ioctl(fd, SIOCGIFNETMASK, req)
+}
+
+unsafe fn siocgifmtu(fd: c_int, req: *mut ifreq) -> c_int {
+    ioctl(fd, SIOCGIFMTU, req)
+}
+
+// SIOCSIF* 写入函数
+unsafe fn siocsifflags(fd: c_int, req: *const ifreq) -> c_int {
+    ioctl(fd, SIOCSIFFLAGS, req)
+}
+
+unsafe fn siocsifaddr(fd: c_int, req: *const ifreq) -> c_int {
+    ioctl(fd, SIOCSIFADDR, req)
+}
+
+unsafe fn siocsifdstaddr(fd: c_int, req: *const ifreq) -> c_int {
+    ioctl(fd, SIOCSIFDSTADDR, req)
+}
+
+unsafe fn siocsifbrdaddr(fd: c_int, req: *const ifreq) -> c_int {
+    ioctl(fd, SIOCSIFBRDADDR, req)
+}
+
+unsafe fn siocsifnetmask(fd: c_int, req: *const ifreq) -> c_int {
+    ioctl(fd, SIOCSIFNETMASK, req)
+}
+
+unsafe fn siocsifmtu(fd: c_int, req: *const ifreq) -> c_int {
+    ioctl(fd, SIOCSIFMTU, req)
+}
+
+unsafe fn siocsifname(fd: c_int, req: *const ifreq) -> c_int {
+    ioctl(fd, SIOCSIFNAME, req)
+}
+
+// TUNSET* 写入函数
+unsafe fn tunsetiff(fd: c_int, req: *const c_int) -> c_int {
+    ioctl(fd, TUNSETIFF, req)
+}
+
+unsafe fn tunsetpersist(fd: c_int, req: *const c_int) -> c_int {
+    ioctl(fd, TUNSETPERSIST, req)
+}
+
+unsafe fn tunsetowner(fd: c_int, req: *const c_int) -> c_int {
+    ioctl(fd, TUNSETOWNER, req)
+}
+
+unsafe fn tunsetgroup(fd: c_int, req: *const c_int) -> c_int {
+    ioctl(fd, TUNSETGROUP, req)
+}
