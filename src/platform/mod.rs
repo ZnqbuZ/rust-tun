@@ -47,6 +47,10 @@ pub use crate::platform::posix::Tun;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+
+#[cfg(target_env = "ohos")]
+mod ohos;
+
 #[cfg(target_os = "windows")]
 pub use self::windows::{create, Device, PlatformConfig, Tun};
 
