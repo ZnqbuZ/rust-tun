@@ -17,9 +17,14 @@
 #[cfg(unix)]
 pub mod posix;
 
-#[cfg(target_os = "linux")]
+#[cfg(target_env = "ohos")]
+mod ohos;
+#[cfg(target_env = "ohos")]
+pub use self::ohos::{create, Device, PlatformConfig};
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 pub mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 pub use self::linux::{create, Device, PlatformConfig};
 
 #[cfg(target_os = "freebsd")]
@@ -47,6 +52,7 @@ pub use crate::platform::posix::Tun;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+
 #[cfg(target_os = "windows")]
 pub use self::windows::{create, Device, PlatformConfig, Tun};
 
