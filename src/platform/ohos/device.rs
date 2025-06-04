@@ -102,7 +102,7 @@ impl AbstractDevice for Device {
     }
 
     fn tun_name(&self) -> Result<String> {
-        Ok("".to_string())
+        Ok("vpn-tun".to_string())
     }
 
     fn set_tun_name(&mut self, value: &str) -> Result<()> {
