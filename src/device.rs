@@ -93,5 +93,4 @@ pub trait AbstractDevice: Read + Write {
     ///
     /// [Note: This value is not used to specify whether the packets delivered from/to tun2 have packet information. -- end note]
     fn packet_information(&self) -> bool;
-    fn tun_index(&self) -> Result<i32>;
 }

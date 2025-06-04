@@ -25,28 +25,6 @@ use crate::error::Result;
 #[derive(Copy, Clone, Default, Debug)]
 pub struct PlatformConfig;
 
-impl PlatformConfig {
-    /// Dummy functions for compatibility with Linux.
-    pub fn packet_information(&mut self, _value: bool) -> &mut Self {
-        self
-    }
-
-    /// Dummy functions for compatibility with Linux.
-    pub fn ensure_root_privileges(&mut self, _value: bool) -> &mut Self {
-        self
-    }
-
-    /// Dummy functions for compatibility with Linux.
-    pub fn napi(&mut self, _value: bool) -> &mut Self {
-        self
-    }
-
-    /// Dummy functions for compatibility with Linux.
-    pub fn vnet_hdr(&mut self, _value: bool) -> &mut Self {
-        self
-    }
-}
-
 /// Create a TUN device with the given name.
 pub fn create(configuration: &Configuration) -> Result<Device> {
     Device::new(configuration)

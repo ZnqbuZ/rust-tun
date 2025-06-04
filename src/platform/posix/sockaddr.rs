@@ -39,9 +39,9 @@ fn rs_addr_to_sockaddr(addr: std::net::SocketAddr) -> sockaddr_union {
             {
                 addr.addr4.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
             }
-            unsafe { addr.addr4.sin_family = libc::AF_INET as libc::sa_family_t; }
-            unsafe { addr.addr4.sin_addr.s_addr = u32::from_ne_bytes(ipv4.ip().octets()); }
-            unsafe { addr.addr4.sin_port = ipv4.port().to_be(); }
+            addr.addr4.sin_family = libc::AF_INET as libc::sa_family_t;
+            addr.addr4.sin_addr.s_addr = u32::from_ne_bytes(ipv4.ip().octets());
+            addr.addr4.sin_port = ipv4.port().to_be();
             addr
         }
         std::net::SocketAddr::V6(ipv6) => {
@@ -50,9 +50,9 @@ fn rs_addr_to_sockaddr(addr: std::net::SocketAddr) -> sockaddr_union {
             {
                 addr.addr6.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
             }
-            unsafe { addr.addr6.sin6_family = libc::AF_INET6 as libc::sa_family_t; }
-            unsafe { addr.addr6.sin6_addr.s6_addr = ipv6.ip().octets(); }
-            unsafe { addr.addr6.sin6_port = ipv6.port().to_be(); }
+            addr.addr6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            addr.addr6.sin6_addr.s6_addr = ipv6.ip().octets();
+            addr.addr6.sin6_port = ipv6.port().to_be();
             addr
         }
     }
