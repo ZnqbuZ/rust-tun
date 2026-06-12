@@ -25,7 +25,7 @@ mod configuration;
 pub use crate::configuration::{Configuration, Layer};
 
 pub mod platform;
-pub use crate::platform::create;
+pub use crate::platform::{create, Device};
 
 #[cfg(feature = "async")]
 pub mod r#async;
