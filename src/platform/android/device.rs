@@ -75,7 +75,7 @@ impl Device {
     }
 
     /// Send a packet to tun device
-    pub fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
+    pub fn send(&self, buf: &[u8]) -> std::io::Result<()> {
         self.tun.send(buf)
     }
 }
