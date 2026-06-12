@@ -12,6 +12,7 @@
 //
 //  0. You just DO WHAT THE FUCK YOU WANT TO.
 
+use derive_more::{Deref, DerefMut};
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -27,7 +28,10 @@ use crate::platform::windows::verify_dll_file::{
 use crate::utils::{DataExt, SliceExt};
 
 /// A TUN device using the wintun driver.
+#[derive(Deref, DerefMut)]
 pub struct Device {
+    #[deref]
+    #[deref_mut]
     pub(crate) tun: Tun,
     mtu: u16,
     name: String,
@@ -100,16 +104,6 @@ impl Device {
     pub fn split(self) -> (Reader, Writer) {
         let tun = Arc::new(self.tun);
         (Reader(tun.clone()), Writer(tun.clone()))
-    }
-
-    /// Recv a packet from tun device
-    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.tun.recv(buf)
-    }
-
-    /// Send a packet to tun device
-    pub fn send(&self, buf: &[u8]) -> io::Result<()> {
-        self.tun.send(buf)
     }
 }
 

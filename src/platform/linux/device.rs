@@ -12,6 +12,7 @@
 //
 //  0. You just DO WHAT THE FUCK YOU WANT TO.
 
+use derive_more::{Deref, DerefMut};
 use libc::{
     self, c_char, c_short, ifreq, AF_INET, IFF_MULTI_QUEUE, IFF_NAPI, IFF_NO_PI, IFF_RUNNING,
     IFF_TAP, IFF_TUN, IFF_UP, IFF_VNET_HDR, IFNAMSIZ, O_RDWR, SOCK_DGRAM,
@@ -36,8 +37,11 @@ use crate::{
 const OVERWRITE_SIZE: usize = std::mem::size_of::<libc::__c_anonymous_ifr_ifru>();
 
 /// A TUN device using the TUN/TAP Linux driver.
+#[derive(Deref, DerefMut)]
 pub struct Device {
     tun_name: String,
+    #[deref]
+    #[deref_mut]
     tun: Tun,
     ctl: Fd,
 }
@@ -186,21 +190,6 @@ impl Device {
     /// Split the interface into a `Reader` and `Writer`.
     pub fn split(self) -> (posix::Reader, posix::Writer) {
         (self.tun.reader, self.tun.writer)
-    }
-
-    /// Set non-blocking mode
-    pub fn set_nonblock(&self) -> io::Result<()> {
-        self.tun.set_nonblock()
-    }
-
-    /// Recv a packet from tun device
-    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.tun.recv(buf)
-    }
-
-    /// Send a packet to tun device
-    pub fn send(&self, buf: &[u8]) -> io::Result<()> {
-        self.tun.send(buf)
     }
 }
 
