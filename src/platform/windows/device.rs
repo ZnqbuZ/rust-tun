@@ -64,8 +64,7 @@ impl Device {
             let mask = config
                 .netmask
                 .unwrap_or(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)));
-            let gateway = config.destination.map(IpAddr::from);
-            adapter.set_network_addresses_tuple(address, mask, gateway)?;
+            adapter.set_network_addresses_tuple(address, mask, config.destination)?;
             #[cfg(feature = "wintun-dns")]
             if let Some(dns_servers) = &config.platform_config.dns_servers {
                 adapter.set_dns_servers(dns_servers)?;
