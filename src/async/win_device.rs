@@ -27,7 +27,8 @@ use crate::platform::Device;
 /// An async TUN device wrapper around a TUN device.
 pub struct AsyncDevice {
     inner: Device,
-    session: WinSession,
+    reader: DeviceReader,
+    writer: DeviceWriter,
 }
 
 /// Returns a shared reference to the underlying Device object.
@@ -49,11 +50,16 @@ impl core::ops::DerefMut for AsyncDevice {
 impl AsyncDevice {
     /// Create a new `AsyncDevice` wrapping around a `Device`.
     pub fn new(device: Device) -> io::Result<AsyncDevice> {
-        let session = WinSession::new(device.tun.get_session())?;
+        let session = device.tun.get_session();
         Ok(AsyncDevice {
             inner: device,
-            session,
+            reader: DeviceReader::new(session.clone())?,
+            writer: DeviceWriter::new(session.clone())?,
         })
+    }
+
+    pub fn split(self) -> (DeviceReader, DeviceWriter) {
+        (self.reader, self.writer)
     }
 
     /// Consumes this AsyncDevice and return a Framed object (unified Stream and Sink interface)
@@ -81,7 +87,7 @@ impl AsyncRead for AsyncDevice {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.session).poll_read(cx, buf)
+        self.reader.poll_read(cx, buf)
     }
 }
 
@@ -91,44 +97,47 @@ impl AsyncWrite for AsyncDevice {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
-        Pin::new(&mut self.session).poll_write(cx, buf)
+        self.writer.poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Pin::new(&mut self.session).poll_flush(cx)
+        self.writer.poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Pin::new(&mut self.session).poll_shutdown(cx)
+        self.writer.poll_shutdown(cx)
     }
 }
 
-struct WinSession {
+#[derive(Debug)]
+struct DeviceReader {
     session: std::sync::Arc<wintun::Session>,
     receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     _task: std::thread::JoinHandle<()>,
 }
 
-impl WinSession {
-    fn new(session: std::sync::Arc<wintun::Session>) -> Result<WinSession, io::Error> {
+impl DeviceReader {
+    fn new(session: std::sync::Arc<wintun::Session>) -> Result<Self, io::Error> {
         let session_reader = session.clone();
         let (receiver_tx, receiver_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let task = std::thread::spawn(move || loop {
-            match session_reader.receive_blocking() {
-                Ok(packet) => {
-                    if let Err(err) = receiver_tx.send(packet.bytes().to_vec()) {
-                        log::error!("{}", err);
+        let task = std::thread::spawn(move || {
+            loop {
+                match session_reader.receive_blocking() {
+                    Ok(packet) => {
+                        if let Err(err) = receiver_tx.send(packet.bytes().to_vec()) {
+                            log::error!("{}", err);
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        log::info!("{}", err);
                         break;
                     }
-                }
-                Err(err) => {
-                    log::info!("{}", err);
-                    break;
                 }
             }
         });
 
-        Ok(WinSession {
+        Ok(Self {
             session,
             receiver: receiver_rx,
             _task: task,
@@ -136,7 +145,7 @@ impl WinSession {
     }
 }
 
-impl AsyncRead for WinSession {
+impl AsyncRead for DeviceReader {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -152,7 +161,18 @@ impl AsyncRead for WinSession {
     }
 }
 
-impl AsyncWrite for WinSession {
+#[derive(Debug, Clone)]
+struct DeviceWriter {
+    session: std::sync::Arc<wintun::Session>,
+}
+
+impl DeviceWriter {
+    fn new(session: std::sync::Arc<wintun::Session>) -> Result<Self, io::Error> {
+        Ok(Self { session })
+    }
+}
+
+impl AsyncWrite for DeviceWriter {
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,

@@ -14,8 +14,9 @@
 
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use std::io;
 use futures_core::ready;
-use std::io::{IoSlice, Read, Write};
+use std::io::{Error, IoSlice, Read, Write};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -27,7 +28,9 @@ use crate::platform::Device;
 
 /// An async TUN device wrapper around a TUN device.
 pub struct AsyncDevice {
-    inner: AsyncFd<Device>,
+    inner: std::sync::Arc<AsyncFd<Device>>,
+    reader: DeviceReader,
+    writer: DeviceWriter,
 }
 
 /// Returns a shared reference to the underlying Device object.
@@ -50,9 +53,16 @@ impl AsyncDevice {
     /// Create a new `AsyncDevice` wrapping around a `Device`.
     pub fn new(device: Device) -> std::io::Result<AsyncDevice> {
         device.set_nonblock()?;
+        let device = std::sync::Arc::new(AsyncFd::new(device)?);
         Ok(AsyncDevice {
-            inner: AsyncFd::new(device)?,
+            inner: AsyncFd::new(device.clone())?,
+            reader: DeviceReader::new(device.clone()),
+            writer: DeviceWriter::new(device.clone()),
         })
+    }
+
+    pub fn split(self) -> (DeviceReader, DeviceWriter) {
+        (self.reader, self.writer)
     }
 
     /// Consumes this AsyncDevice and return a Framed object (unified Stream and Sink interface)
@@ -86,6 +96,57 @@ impl AsyncRead for AsyncDevice {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.reader.poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AsyncDevice {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, Error>> {
+        self.writer.poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        self.writer.poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        self.writer.poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        self.writer.poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.writer.is_write_vectored()
+    }
+}
+
+#[derive(Debug)]
+pub struct DeviceReader {
+    inner: std::sync::Arc<AsyncFd<Device>>,
+}
+
+impl DeviceReader {
+    fn new(inner: std::sync::Arc<AsyncFd<Device>>) -> std::io::Result<Self> {
+        Ok(Self { inner })
+    }
+}
+
+impl AsyncRead for DeviceReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf,
     ) -> Poll<std::io::Result<()>> {
         loop {
@@ -99,9 +160,20 @@ impl AsyncRead for AsyncDevice {
     }
 }
 
-impl AsyncWrite for AsyncDevice {
+#[derive(Debug, Clone)]
+pub struct DeviceWriter {
+    inner: std::sync::Arc<AsyncFd<Device>>,
+}
+
+impl DeviceWriter {
+    fn new(inner: std::sync::Arc<AsyncFd<Device>>) -> std::io::Result<Self> {
+        Ok(Self { inner })
+    }
+}
+
+impl AsyncWrite for DeviceWriter {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
@@ -114,7 +186,7 @@ impl AsyncWrite for AsyncDevice {
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         loop {
             let mut guard = ready!(self.inner.poll_write_ready_mut(cx))?;
             match guard.try_io(|inner| inner.get_mut().flush()) {
