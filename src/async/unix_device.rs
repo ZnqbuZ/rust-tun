@@ -73,7 +73,7 @@ impl AsyncDevice {
     }
 
     /// Send a packet to tun device
-    pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
+    pub async fn send(&self, buf: &[u8]) -> std::io::Result<()> {
         let guard = self.inner.writable().await?;
         guard
             .get_ref()

@@ -14,7 +14,10 @@ crate-type = ["staticlib", "cdylib", "lib"]
 
 [dependencies]
 bytes = { version = "1" }
+smallvec = "1.15.2"
 cfg-if = "1"
+delegate = "0.13.5"
+derive_more = { version = "2.1.1", features = ["full"] }
 futures-core = { version = "0.3", optional = true }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = "0.4"
@@ -55,7 +58,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [features]
 default = ["wintun-dns"]
-async = ["tokio", "futures-core", "tokio-util"]
+async = ["futures-core", "tokio", "tokio-util"]
 wintun-dns = []
 
 [package.metadata.docs.rs]

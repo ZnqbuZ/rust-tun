@@ -29,6 +29,8 @@ pub use crate::platform::create;
 
 #[cfg(feature = "async")]
 pub mod r#async;
+pub mod utils;
+
 #[cfg(feature = "async")]
 pub use r#async::*;
 
