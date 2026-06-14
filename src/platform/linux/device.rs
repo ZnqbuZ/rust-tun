@@ -17,6 +17,14 @@ use libc::{
     self, c_char, c_short, ifreq, AF_INET, IFF_MULTI_QUEUE, IFF_NAPI, IFF_NO_PI, IFF_RUNNING,
     IFF_TAP, IFF_TUN, IFF_UP, IFF_VNET_HDR, IFNAMSIZ, O_RDWR, SOCK_DGRAM,
 };
+use netlink_packet_core::{
+    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
+};
+use netlink_packet_route::{
+    tc::{TcAttribute, TcMessage},
+    RouteNetlinkMessage,
+};
+use netlink_sys::{protocols::NETLINK_ROUTE, Socket, SocketAddr};
 use std::{
     ffi::{CStr, CString},
     io::{self, Read, Write},
@@ -25,6 +33,8 @@ use std::{
     os::unix::io::{AsRawFd, IntoRawFd, RawFd},
     ptr,
 };
+
+const TC_H_ROOT: u32 = 0xFFFF_FFFF;
 
 use crate::{
     configuration::{Configuration, Layer},
@@ -137,9 +147,50 @@ impl Device {
 
         if config.platform_config.ensure_root_privileges {
             device.configure(config)?;
+            if let Err(error) = device.set_qdisc("pfifo_fast") {
+                log::warn!("failed to set qdisc = pfifo_fast: {:?}", error);
+            }
         }
 
         Ok(device)
+    }
+
+    fn set_qdisc(&self, qdisc: &str) -> Result<(), io::Error> {
+        let ifindex =
+            unsafe { libc::if_nametoindex(CString::new(self.tun_name.as_str())?.as_ptr()) };
+        if ifindex == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut tc_msg = TcMessage::with_index(ifindex as _);
+        tc_msg.header.parent = TC_H_ROOT.into();
+        tc_msg.attributes.push(TcAttribute::Kind(qdisc.to_string()));
+
+        let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewQueueDiscipline(tc_msg));
+        nl_msg.header.flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE | NLM_F_ACK;
+        nl_msg.header.sequence_number = 1;
+        nl_msg.finalize();
+
+        let mut buf = vec![0u8; nl_msg.buffer_len()];
+        nl_msg.serialize(&mut buf);
+
+        let socket = Socket::new(NETLINK_ROUTE)?;
+        socket.send_to(&buf, &SocketAddr::new(0, 0), 0)?;
+
+        let mut resp = Vec::with_capacity(4096);
+        let n = socket.recv(&mut resp, 0)?;
+
+        if let NetlinkPayload::Error(err) =
+            NetlinkMessage::<RouteNetlinkMessage>::deserialize(&resp[..n])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?
+                .payload
+        {
+            if err.code.is_some() {
+                return Err(err.to_io());
+            }
+        }
+
+        Ok(())
     }
 
     /// Prepare a new request.

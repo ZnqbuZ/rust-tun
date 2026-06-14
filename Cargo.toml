@@ -32,6 +32,11 @@ tokio-util = { version = "0.7", features = ["codec"], optional = true }
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "android", target_os="freebsd"))'.dependencies]
 nix = { version = "0.29", features = ["ioctl"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-packet-core = "0.8"
+netlink-packet-route = "0.31"
+netlink-sys = "0.8"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
