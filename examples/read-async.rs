@@ -12,9 +12,8 @@
 //
 //  0. You just DO WHAT THE FUCK YOU WANT TO.
 
-use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::Receiver;
-use tun_easytier::{AbstractDevice, BoxError};
+use tun_easytier::{AbstractDevice, AsyncReadExt, BoxError};
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
@@ -45,8 +44,9 @@ async fn main_entry(mut quit: Receiver<()>) -> Result<(), BoxError> {
         config.ensure_root_privileges(true);
     });
 
-    let mut dev = tun_easytier::create_as_async(&config)?;
+    let dev = tun_easytier::create_as_async(&config)?;
     let size = dev.mtu()? as usize + tun_easytier::PACKET_INFORMATION_LENGTH;
+    let (mut reader, _) = dev.split();
     let mut buf = vec![0; size];
     loop {
         tokio::select! {
@@ -54,7 +54,7 @@ async fn main_entry(mut quit: Receiver<()>) -> Result<(), BoxError> {
                 println!("Quit...");
                 break;
             }
-            len = dev.read(&mut buf) => {
+            len = reader.read(&mut buf) => {
                 println!("pkt: {:?}", &buf[..len?]);
             }
         };

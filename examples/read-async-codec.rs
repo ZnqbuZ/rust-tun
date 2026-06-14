@@ -13,11 +13,10 @@
 //  0. You just DO WHAT THE FUCK YOU WANT TO.
 
 use bytes::BytesMut;
-use futures::StreamExt;
 use packet::{ip::Packet, Error};
 use tokio::sync::mpsc::Receiver;
-use tokio_util::codec::{Decoder, FramedRead};
-use tun_easytier::BoxError;
+use tokio_util::codec::Decoder;
+use tun_easytier::{AbstractDevice, AsyncReadExt, BoxError};
 
 pub struct IPPacketCodec;
 
@@ -77,8 +76,10 @@ async fn main_entry(mut quit: Receiver<()>) -> Result<(), BoxError> {
     });
 
     let dev = tun_easytier::create_as_async(&config)?;
-
-    let mut stream = FramedRead::new(dev, IPPacketCodec);
+    let size = dev.mtu().unwrap_or(65535) as usize + tun_easytier::PACKET_INFORMATION_LENGTH;
+    let (mut reader, _) = dev.split();
+    let mut codec = IPPacketCodec;
+    let mut buf = vec![0; size];
 
     loop {
         tokio::select! {
@@ -86,9 +87,11 @@ async fn main_entry(mut quit: Receiver<()>) -> Result<(), BoxError> {
                 println!("Quit...");
                 break;
             }
-            Some(packet) = stream.next() => {
-                match packet {
-                    Ok(pkt) => println!("pkt: {:#?}", pkt),
+            len = reader.read(&mut buf) => {
+                let mut bytes = BytesMut::from(&buf[..len?]);
+                match codec.decode(&mut bytes) {
+                    Ok(Some(pkt)) => println!("pkt: {:#?}", pkt),
+                    Ok(None) => {},
                     Err(err) => panic!("Error: {:?}", err),
                 }
             }
