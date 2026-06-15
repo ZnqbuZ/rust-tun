@@ -224,13 +224,19 @@ async fn tun_to_tcp_task(
     let mut tun_rx = TunRx::new(reader);
 
     loop {
-        let pkt = tun_rx.recv().await?;
-        batched_write.feed(pkt).await?;
-        // If we want to flush immediately for latency we can do it,
-        // but batching helps with throughput. Let's flush every packet
-        // for simplicity, or rely on another mechanism. Actually, let's
-        // just yield to let batching build up naturally.
-        batched_write.flush().await?;
+        // 利用 tokio 的 select 机制构建微观上的批处理空闲刷新
+        tokio::select! {
+            // 优先读取 TUN 数据并投入批处理队列
+            res = tun_rx.recv() => {
+                let pkt = res?;
+                batched_write.feed(pkt).await?;
+                // 如果单次队列达到设定的阈值，通过 poll_ready 内部逻辑即可触发实际刷写
+            }
+            // 当主循环无数据可读短暂闲置时，利用 yield 触发排空操作保障低延迟
+            _ = tokio::task::yield_now(), if batched_write.sending_bufs.len() > 0 => {
+                batched_write.flush().await?;
+            }
+        }
     }
 }
 
