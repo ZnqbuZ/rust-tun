@@ -4,6 +4,7 @@ use std::io::{self, ErrorKind, IoSlice};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::process::Command;
+use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -12,6 +13,7 @@ use tokio::io::AsyncWrite;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio_util::codec::{Decoder, FramedRead};
 use tokio_util::io::poll_write_buf;
+use tun_rs::{AsyncDevice, DeviceBuilder};
 use tun_easytier::{AsyncReader, AsyncWriter, Configuration, AsyncReadExt, AsyncWriteExt, AbstractDevice};
 
 const MAX_MTU: u16 = 1500;
@@ -150,12 +152,12 @@ impl<W: AsyncWrite + Unpin> Sink<Bytes> for BatchedFramedWriter<W> {
 // --- TunRx and TunTx from easytier ---
 
 struct TunRx {
-    reader: AsyncReader,
+    reader: Arc<AsyncDevice>,
     buf: BytesMut,
 }
 
 impl TunRx {
-    fn new(reader: AsyncReader) -> Self {
+    fn new(reader: Arc<AsyncDevice>) -> Self {
         Self {
             reader,
             buf: BytesMut::with_capacity(BUFFER_SIZE),
@@ -169,7 +171,7 @@ impl TunRx {
             self.buf.set_len(BUFFER_SIZE + 4);
         }
 
-        let n = self.reader.read(&mut self.buf[4..]).await?;
+        let n = self.reader.recv(&mut self.buf[4..]).await?;
         if n == 0 {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "read zero"));
         }
@@ -184,17 +186,17 @@ impl TunRx {
 }
 
 struct TunTx {
-    writer: AsyncWriter,
+    writer: Arc<AsyncDevice>,
     pub dropped: u64,
 }
 
 impl TunTx {
-    fn new(writer: AsyncWriter) -> Self {
+    fn new(writer: Arc<AsyncDevice>) -> Self {
         Self { writer, dropped: 0 }
     }
 
     fn write(&mut self, frame: &[u8]) -> io::Result<()> {
-        match self.writer.try_write(frame) {
+        match self.writer.try_send(frame) {
             Ok(_) => Ok(()),
             Err(e) => {
                 if e.kind() != ErrorKind::WouldBlock {
@@ -215,7 +217,7 @@ impl TunTx {
 // --- Tasks ---
 
 async fn tun_to_tcp_task(
-    reader: tun_easytier::AsyncReader,
+    reader: Arc<AsyncDevice>,
     tcp_write: tokio::net::tcp::OwnedWriteHalf,
 ) -> Result<(), std::io::Error> {
     let mut batched_write = BatchedFramedWriter::new(tcp_write);
@@ -234,7 +236,7 @@ async fn tun_to_tcp_task(
 
 async fn tcp_to_tun_task(
     tcp_read: tokio::net::tcp::OwnedReadHalf,
-    writer: tun_easytier::AsyncWriter,
+    writer: Arc<AsyncDevice>,
 ) -> Result<(), std::io::Error> {
     let mut framed_read = FramedRead::new(tcp_read, PacketCodec);
     let mut tun_tx = TunTx::new(writer);
@@ -275,27 +277,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "172.17.0.2"
     };
 
-    let mut config = Configuration::default();
-    config
-        .address(tun_ip.parse::<Ipv4Addr>()?)
-        .netmask((255, 255, 255, 0))
+    let dev = Arc::new(DeviceBuilder::new()
+        .name("tun0")
+        .ipv4(tun_ip.parse::<Ipv4Addr>()?, 24, None)
         .mtu(MAX_MTU)
-        .tun_name("tun0")
-        .up();
+        .build_async()?);
 
-    #[cfg(target_os = "linux")]
-    config.platform_config(|config| {
-        config.ensure_root_privileges(true);
-        config.vnet_hdr(false); // No VNET_HDR
-    });
-
-    let dev = tun_easytier::create_as_async(&config)?;
-    let tun_name = dev.tun_name()?;
+    let tun_name = dev.name()?;
     println!("TUN device created: {}", tun_name);
 
     setup_route(&tun_name, target_ip);
-
-    let (reader, writer) = dev.split();
 
     let stream = if mode == "server" {
         let listener = TcpListener::bind(addr).await?;
@@ -323,8 +314,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tun_ip, target_ip
     );
 
-    let t1 = tokio::spawn(tun_to_tcp_task(reader, tcp_write));
-    let t2 = tokio::spawn(tcp_to_tun_task(tcp_read, writer));
+    let t1 = tokio::spawn(tun_to_tcp_task(dev.clone(), tcp_write));
+    let t2 = tokio::spawn(tcp_to_tun_task(tcp_read, dev.clone()));
 
     tokio::select! {
         res = t1 => { println!("TUN -> TCP task finished: {:?}", res?); }
