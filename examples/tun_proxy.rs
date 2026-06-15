@@ -1,25 +1,10 @@
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//                    Version 2, December 2004
-//
-// Copyleft (ↄ) meh. <meh@schizofreni.co> | http://meh.schizofreni.co
-//
-// Everyone is permitted to copy and distribute verbatim or modified
-// copies of this license document, and changing it is allowed as long
-// as the name is changed.
-//
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
-//
-//  0. You just DO WHAT THE FUCK YOU WANT TO.
-
 use std::collections::VecDeque;
 use std::env;
-use std::io::IoSlice;
+use std::io::{self, ErrorKind, IoSlice};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::process::Command;
 use std::task::{ready, Context, Poll};
-use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use futures::{Sink, SinkExt, StreamExt};
@@ -27,14 +12,11 @@ use tokio::io::AsyncWrite;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio_util::codec::{Decoder, FramedRead};
 use tokio_util::io::poll_write_buf;
-use tun_easytier::{AbstractDevice, AsyncReadExt, AsyncWriteExt, Configuration};
+use tun_easytier::{AsyncReader, AsyncWriter, Configuration, AsyncReadExt, AsyncWriteExt, AbstractDevice};
 
-const MAX_MTU: u16 = 65535;
-const VNET_HDR_LEN: usize = 10;
-const LEN_PREFIX_LEN: usize = 4;
-const BUFFER_SIZE: usize = MAX_MTU as usize + VNET_HDR_LEN + LEN_PREFIX_LEN + 64;
-const BATCH_SIZE: usize = 128;
-const FLUSH_INTERVAL: Duration = Duration::from_millis(1);
+const MAX_MTU: u16 = 1500;
+const BUFFER_SIZE: usize = 65536;
+const BATCH_SIZE: usize = 64;
 
 // --- High-Performance Utilities ---
 
@@ -132,7 +114,6 @@ impl<W: AsyncWrite + Unpin> Sink<Bytes> for BatchedFramedWriter<W> {
     type Error = std::io::Error;
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        // Flush if batch size is reached
         if this.sending_bufs.len() >= BATCH_SIZE {
             Pin::new(this).poll_flush(cx)
         } else {
@@ -166,50 +147,103 @@ impl<W: AsyncWrite + Unpin> Sink<Bytes> for BatchedFramedWriter<W> {
     }
 }
 
-// --- Optimization: Zero-Copy Length Prefixing ---
+// --- TunRx and TunTx from easytier ---
 
-async fn tun_to_tcp_task(
-    mut reader: tun_easytier::AsyncReader,
-    tcp_write: tokio::net::tcp::OwnedWriteHalf,
-) -> Result<(), std::io::Error> {
-    let mut batched_write = BatchedFramedWriter::new(tcp_write);
-    let mut interval = tokio::time::interval(FLUSH_INTERVAL);
-    let mut pool = BytesMut::with_capacity(BUFFER_SIZE);
+struct TunRx {
+    reader: AsyncReader,
+    buf: BytesMut,
+}
 
-    loop {
-        tokio::select! {
-            n_res = reader.read(unsafe {
-                // Read into buffer starting at offset 4 to leave space for length prefix
-                pool.set_len(BUFFER_SIZE);
-                &mut pool[LEN_PREFIX_LEN..]
-            }) => {
-                let n = n_res?;
-                if n == 0 { break; }
+impl TunRx {
+    fn new(reader: AsyncReader) -> Self {
+        Self {
+            reader,
+            buf: BytesMut::with_capacity(BUFFER_SIZE),
+        }
+    }
 
-                // Write length prefix into the first 4 bytes
-                let len_bytes = (n as u32).to_le_bytes();
-                pool[0..4].copy_from_slice(&len_bytes);
+    async fn recv(&mut self) -> io::Result<Bytes> {
+        self.buf.reserve(BUFFER_SIZE);
+        // Leave 4 bytes for TCP length prefix
+        unsafe {
+            self.buf.set_len(BUFFER_SIZE + 4);
+        }
 
-                // Extract the whole packet (4 bytes prefix + n bytes data)
-                let pkt = pool.split_to(n + LEN_PREFIX_LEN).freeze();
-                batched_write.feed(pkt).await?;
-            }
-            _ = interval.tick() => {
-                batched_write.flush().await?;
+        let n = self.reader.read(&mut self.buf[4..]).await?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "read zero"));
+        }
+
+        self.buf.truncate(n + 4);
+
+        let len_bytes = (n as u32).to_le_bytes();
+        self.buf[0..4].copy_from_slice(&len_bytes);
+
+        Ok(self.buf.split_to(n + 4).freeze())
+    }
+}
+
+struct TunTx {
+    writer: AsyncWriter,
+    pub dropped: u64,
+}
+
+impl TunTx {
+    fn new(writer: AsyncWriter) -> Self {
+        Self { writer, dropped: 0 }
+    }
+
+    fn write(&mut self, frame: &[u8]) -> io::Result<()> {
+        match self.writer.try_write(frame) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if e.kind() != ErrorKind::WouldBlock {
+                    return Err(e);
+                }
+                self.dropped += 1;
+                Ok(())
             }
         }
     }
-    Ok(())
+
+    pub fn send(&mut self, item: Bytes) -> io::Result<()> {
+        // item already has length prefix stripped by FramedRead
+        self.write(&item)
+    }
+}
+
+// --- Tasks ---
+
+async fn tun_to_tcp_task(
+    reader: tun_easytier::AsyncReader,
+    tcp_write: tokio::net::tcp::OwnedWriteHalf,
+) -> Result<(), std::io::Error> {
+    let mut batched_write = BatchedFramedWriter::new(tcp_write);
+    let mut tun_rx = TunRx::new(reader);
+
+    loop {
+        let pkt = tun_rx.recv().await?;
+        batched_write.feed(pkt).await?;
+        // If we want to flush immediately for latency we can do it,
+        // but batching helps with throughput. Let's flush every packet
+        // for simplicity, or rely on another mechanism. Actually, let's
+        // just yield to let batching build up naturally.
+        batched_write.flush().await?;
+    }
 }
 
 async fn tcp_to_tun_task(
     tcp_read: tokio::net::tcp::OwnedReadHalf,
-    mut writer: tun_easytier::AsyncWriter,
+    writer: tun_easytier::AsyncWriter,
 ) -> Result<(), std::io::Error> {
     let mut framed_read = FramedRead::new(tcp_read, PacketCodec);
+    let mut tun_tx = TunTx::new(writer);
+
     while let Some(res) = framed_read.next().await {
         let pkt = res?;
-        writer.write(&pkt).await?;
+        if let Err(e) = tun_tx.send(pkt) {
+            eprintln!("tun tx error: {:?}", e);
+        }
     }
     Ok(())
 }
@@ -246,20 +280,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .address(tun_ip.parse::<Ipv4Addr>()?)
         .netmask((255, 255, 255, 0))
         .mtu(MAX_MTU)
-        .tun_name("tun0") // Fixed name for easier routing
+        .tun_name("tun0")
         .up();
 
     #[cfg(target_os = "linux")]
     config.platform_config(|config| {
         config.ensure_root_privileges(true);
-        config.vnet_hdr(true);
+        config.vnet_hdr(false); // No VNET_HDR
     });
 
     let dev = tun_easytier::create_as_async(&config)?;
     let tun_name = dev.tun_name()?;
     println!("TUN device created: {}", tun_name);
 
-    // Auto-setup route (optional, but helps avoid user error)
     setup_route(&tun_name, target_ip);
 
     let (reader, writer) = dev.split();
@@ -277,7 +310,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             TcpSocket::new_v6()?
         };
-        // Increase TCP buffer sizes
         let _ = socket.set_send_buffer_size(1024 * 1024);
         let _ = socket.set_recv_buffer_size(1024 * 1024);
         socket.connect(addr).await?
