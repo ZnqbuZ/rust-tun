@@ -1,63 +1,94 @@
 use std::env;
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::process::Command;
 use std::sync::Arc;
+use std::sync::RwLock;
 
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
 const MAX_MTU: u16 = 1400;
 const BUFFER_SIZE: usize = 65536;
+const QUEUE_COUNT: usize = 4;
 
-async fn tun_to_udp_task(
+// 引入全局共享的动态 Peer 地址
+type SharedPeer = Arc<RwLock<Option<SocketAddr>>>;
+
+async fn queue_worker(
+    queue_id: usize,
     dev: Arc<AsyncDevice>,
     socket: Arc<UdpSocket>,
+    shared_peer: SharedPeer,
+    is_client: bool,
 ) -> Result<(), std::io::Error> {
-    let mut buf = vec![0u8; BUFFER_SIZE];
-    loop {
-        let n = dev.recv(&mut buf).await?;
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TUN device closed"));
-        }
-        socket.send(&buf[..n]).await?;
-    }
-}
+    println!("Worker [{}] started.", queue_id);
 
-async fn udp_to_tun_task(
-    socket: Arc<UdpSocket>,
-    dev: Arc<AsyncDevice>,
-    mut first_pkt: Option<Vec<u8>>,
-) -> Result<(), std::io::Error> {
-    // 优先处理服务端在建立连接时缓存的首个数据包
-    if let Some(pkt) = first_pkt.take() {
-        if let Err(e) = dev.try_send(&pkt) {
-            eprintln!("TUN tx error for first packet: {:?}", e);
-        }
-    }
+    let mut rx_buf = vec![0u8; BUFFER_SIZE];
+    let mut tx_buf = vec![0u8; BUFFER_SIZE];
 
-    let mut buf = vec![0u8; BUFFER_SIZE];
+    // 终极优化：线程本地变量，彻底消除 Hot Path 上的原子锁争用
+    let mut local_peer: Option<SocketAddr> = None;
+
     loop {
-        let n = socket.recv(&mut buf).await?;
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UDP socket closed"));
-        }
-        if let Err(e) = dev.try_send(&buf[..n]) {
-            if e.kind() != ErrorKind::WouldBlock {
-                eprintln!("TUN tx error: {:?}", e);
+        tokio::select! {
+            // 1. 从 TUN 读取，通过 UDP 发送
+            res = dev.recv(&mut rx_buf) => {
+                let n = res?;
+                if n == 0 { break; }
+
+                // Fast Path：无锁读取本地变量（零成本）
+                if local_peer.is_none() {
+                    // Slow Path：仅在本地不知道发给谁时，才去读全局锁
+                    local_peer = *shared_peer.read().unwrap();
+                }
+
+                if let Some(addr) = local_peer {
+                    let _ = socket.send_to(&rx_buf[..n], addr).await;
+                }
+            }
+
+            // 2. 从 UDP 读取，写入 TUN，并维护地址状态
+            res = socket.recv_from(&mut tx_buf) => {
+                let (n, peer_addr) = res?;
+                if n == 0 { break; }
+
+                // 仅当物理对端地址发生实质变化时，才触发状态更新
+                if local_peer != Some(peer_addr) {
+                    // 更新当前线程的无锁缓存
+                    local_peer = Some(peer_addr);
+
+                    if !is_client {
+                        // 严格读写分离：先用无锁的 read() 检查全局状态
+                        let global_val = *shared_peer.read().unwrap();
+                        if global_val != Some(peer_addr) {
+                            println!("Worker [{}] globally mapped to new peer: {}", queue_id, peer_addr);
+                            // 只有全局状态真的过时了，才去抢占极其昂贵的写锁
+                            *shared_peer.write().unwrap() = Some(peer_addr);
+                        }
+                    }
+                }
+
+                if let Err(e) = dev.send(&tx_buf[..n]).await {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        eprintln!("Worker [{}] TUN tx error: {:?}", queue_id, e);
+                    }
+                }
             }
         }
     }
+    Ok(())
 }
 
-fn setup_route(tun_name: &str, target_ip: &str) {
-    println!(
-        "Setting up route: ip route add {} dev {}",
-        target_ip, tun_name
-    );
-    let _ = Command::new("ip")
-        .args(["route", "add", target_ip, "dev", tun_name])
-        .status();
+fn create_reuseport_udp(addr: SocketAddr) -> Result<std::net::UdpSocket, std::io::Error> {
+    let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+
+    Ok(socket.into())
 }
 
 #[tokio::main]
@@ -71,56 +102,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = &args[1];
     let addr: SocketAddr = args[2].parse()?;
     let tun_ip = args[3].clone();
-    let target_ip = if mode == "server" {
-        "172.17.0.1"
-    } else {
-        "172.17.0.2"
-    };
 
-    let dev = Arc::new(DeviceBuilder::new()
+    let dev_main = DeviceBuilder::new()
         .name("tun0")
         .ipv4(tun_ip.parse::<Ipv4Addr>()?, 24, None)
         .mtu(MAX_MTU)
-        .build_async()?);
+        .multi_queue(true)
+        .build_async()?;
 
-    let tun_name = dev.name()?;
-    println!("TUN device created: {}", tun_name);
+    let mut devices = vec![dev_main];
+    for _ in 1..QUEUE_COUNT {
+        devices.push(devices[0].try_clone()?);
+    }
 
-    setup_route(&tun_name, target_ip);
+    // 初始化全局对端地址表
+    let shared_peer: SharedPeer = Arc::new(RwLock::new(None));
 
-    let (socket, first_pkt) = if mode == "server" {
-        let socket = UdpSocket::bind(addr).await?;
-        println!("UDP Server listening on {}. Waiting for client packet...", addr);
+    if mode == "client" {
+        // 客户端明确知道服务端的地址，直接预先填入
+        *shared_peer.write().unwrap() = Some(addr);
+    }
 
-        let mut first_buf = vec![0u8; BUFFER_SIZE];
-        let (n, peer) = socket.recv_from(&mut first_buf).await?;
-        println!("Received packet from peer: {}, establishing point-to-point tunnel", peer);
+    let mut handles = vec![];
 
-        socket.connect(peer).await?;
-        (Arc::new(socket), Some(first_buf[..n].to_vec()))
-    } else {
-        let local_addr: SocketAddr = if addr.is_ipv4() {
-            "0.0.0.0:0".parse()?
+    for (i, dev) in devices.into_iter().enumerate() {
+        let dev_arc = Arc::new(dev);
+        let peer_clone = shared_peer.clone();
+
+        let socket = if mode == "server" {
+            let std_sock = create_reuseport_udp(addr)?;
+            UdpSocket::from_std(std_sock)?
         } else {
-            "[::]:0".parse()?
+            let local_addr: SocketAddr = "0.0.0.0:0".parse()?;
+            let std_sock = create_reuseport_udp(local_addr)?;
+            UdpSocket::from_std(std_sock)?
+            // 客户端不再使用 connect()，而是统一使用 send_to() 以保持逻辑对称
         };
-        let socket = UdpSocket::bind(local_addr).await?;
-        println!("Connecting to UDP server at {}", addr);
-        socket.connect(addr).await?;
-        (Arc::new(socket), None)
-    };
 
-    println!(
-        "UDP tunnel established between {} and {}",
-        tun_ip, target_ip
-    );
+        let socket_arc = Arc::new(socket);
 
-    let t1 = tokio::spawn(tun_to_udp_task(dev.clone(), socket.clone()));
-    let t2 = tokio::spawn(udp_to_tun_task(socket.clone(), dev.clone(), first_pkt));
+        let is_client = mode == "client";
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = queue_worker(i, dev_arc, socket_arc, peer_clone, is_client).await {
+                eprintln!("Worker [{}] error: {:?}", i, e);
+            }
+        }));
+    }
 
-    tokio::select! {
-        res = t1 => { println!("TUN -> UDP task finished: {:?}", res?); }
-        res = t2 => { println!("UDP -> TUN task finished: {:?}", res?); }
+    for handle in handles {
+        let _ = handle.await;
     }
 
     Ok(())
