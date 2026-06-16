@@ -1,259 +1,53 @@
-use std::collections::VecDeque;
 use std::env;
-use std::io::{self, ErrorKind, IoSlice};
+use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
 
-use bytes::{Buf, Bytes, BytesMut};
-use futures::{Sink, SinkExt, StreamExt};
-use tokio::io::AsyncWrite;
-use tokio::net::{TcpListener, TcpSocket};
-use tokio_util::codec::{Decoder, FramedRead};
-use tokio_util::io::poll_write_buf;
+use tokio::net::UdpSocket;
 use tun_rs::{AsyncDevice, DeviceBuilder};
-use tun_easytier::{AsyncReader, AsyncWriter, Configuration, AsyncReadExt, AsyncWriteExt, AbstractDevice};
 
-const MAX_MTU: u16 = 1500;
+const MAX_MTU: u16 = 1400;
 const BUFFER_SIZE: usize = 65536;
-const BATCH_SIZE: usize = 64;
 
-// --- High-Performance Utilities ---
-
-struct BufList {
-    bufs: VecDeque<Bytes>,
-}
-
-impl BufList {
-    fn new() -> Self {
-        Self {
-            bufs: VecDeque::new(),
-        }
-    }
-    fn push(&mut self, buf: Bytes) {
-        if buf.has_remaining() {
-            self.bufs.push_back(buf);
-        }
-    }
-    fn len(&self) -> usize {
-        self.bufs.len()
-    }
-}
-
-impl Buf for BufList {
-    fn remaining(&self) -> usize {
-        self.bufs.iter().map(|b| b.remaining()).sum()
-    }
-    fn chunk(&self) -> &[u8] {
-        self.bufs.front().map(|b| b.chunk()).unwrap_or_default()
-    }
-    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
-        let mut n = 0;
-        for buf in &self.bufs {
-            if n >= dst.len() {
-                break;
-            }
-            n += buf.chunks_vectored(&mut dst[n..]);
-        }
-        n
-    }
-    fn advance(&mut self, mut cnt: usize) {
-        while cnt > 0 {
-            let front = self.bufs.front_mut().expect("advance beyond remaining");
-            let rem = front.remaining();
-            if cnt < rem {
-                front.advance(cnt);
-                return;
-            } else {
-                cnt -= rem;
-                self.bufs.pop_front();
-            }
-        }
-    }
-}
-
-struct PacketCodec;
-impl Decoder for PacketCodec {
-    type Item = Bytes;
-    type Error = std::io::Error;
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            return Ok(None);
-        }
-        let len = u32::from_le_bytes(src[..4].try_into().unwrap()) as usize;
-        if len > BUFFER_SIZE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Packet too large",
-            ));
-        }
-        if src.len() < 4 + len {
-            src.reserve(4 + len - src.len());
-            return Ok(None);
-        }
-        src.advance(4);
-        Ok(Some(src.split_to(len).freeze()))
-    }
-}
-
-struct BatchedFramedWriter<W> {
-    writer: W,
-    sending_bufs: BufList,
-}
-
-impl<W: AsyncWrite + Unpin> BatchedFramedWriter<W> {
-    fn new(writer: W) -> Self {
-        Self {
-            writer,
-            sending_bufs: BufList::new(),
-        }
-    }
-}
-
-impl<W: AsyncWrite + Unpin> Sink<Bytes> for BatchedFramedWriter<W> {
-    type Error = std::io::Error;
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let this = self.get_mut();
-        if this.sending_bufs.len() >= BATCH_SIZE {
-            Pin::new(this).poll_flush(cx)
-        } else {
-            Poll::Ready(Ok(()))
-        }
-    }
-    fn start_send(self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
-        self.get_mut().sending_bufs.push(item);
-        Ok(())
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let this = self.get_mut();
-        while this.sending_bufs.remaining() > 0 {
-            let n = ready!(poll_write_buf(
-                Pin::new(&mut this.writer),
-                cx,
-                &mut this.sending_bufs
-            ))?;
-            if n == 0 {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "TCP closed",
-                )));
-            }
-        }
-        Pin::new(&mut this.writer).poll_flush(cx)
-    }
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        ready!(self.as_mut().poll_flush(cx))?;
-        Pin::new(&mut self.get_mut().writer).poll_shutdown(cx)
-    }
-}
-
-// --- TunRx and TunTx from easytier ---
-
-struct TunRx {
-    reader: Arc<AsyncDevice>,
-    buf: BytesMut,
-}
-
-impl TunRx {
-    fn new(reader: Arc<AsyncDevice>) -> Self {
-        Self {
-            reader,
-            buf: BytesMut::with_capacity(BUFFER_SIZE),
-        }
-    }
-
-    async fn recv(&mut self) -> io::Result<Bytes> {
-        self.buf.reserve(BUFFER_SIZE);
-        // Leave 4 bytes for TCP length prefix
-        unsafe {
-            self.buf.set_len(BUFFER_SIZE + 4);
-        }
-
-        let n = self.reader.recv(&mut self.buf[4..]).await?;
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "read zero"));
-        }
-
-        self.buf.truncate(n + 4);
-
-        let len_bytes = (n as u32).to_le_bytes();
-        self.buf[0..4].copy_from_slice(&len_bytes);
-
-        Ok(self.buf.split_to(n + 4).freeze())
-    }
-}
-
-struct TunTx {
-    writer: Arc<AsyncDevice>,
-    pub dropped: u64,
-}
-
-impl TunTx {
-    fn new(writer: Arc<AsyncDevice>) -> Self {
-        Self { writer, dropped: 0 }
-    }
-
-    fn write(&mut self, frame: &[u8]) -> io::Result<()> {
-        match self.writer.try_send(frame) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                if e.kind() != ErrorKind::WouldBlock {
-                    return Err(e);
-                }
-                self.dropped += 1;
-                Ok(())
-            }
-        }
-    }
-
-    pub fn send(&mut self, item: Bytes) -> io::Result<()> {
-        // item already has length prefix stripped by FramedRead
-        self.write(&item)
-    }
-}
-
-// --- Tasks ---
-
-async fn tun_to_tcp_task(
-    reader: Arc<AsyncDevice>,
-    tcp_write: tokio::net::tcp::OwnedWriteHalf,
+async fn tun_to_udp_task(
+    dev: Arc<AsyncDevice>,
+    socket: Arc<UdpSocket>,
 ) -> Result<(), std::io::Error> {
-    let mut batched_write = BatchedFramedWriter::new(tcp_write);
-    let mut tun_rx = TunRx::new(reader);
-
+    let mut buf = vec![0u8; BUFFER_SIZE];
     loop {
-        // 利用 tokio 的 select 机制构建微观上的批处理空闲刷新
-        tokio::select! {
-            // 优先读取 TUN 数据并投入批处理队列
-            res = tun_rx.recv() => {
-                let pkt = res?;
-                batched_write.feed(pkt).await?;
-                // 如果单次队列达到设定的阈值，通过 poll_ready 内部逻辑即可触发实际刷写
-            }
-            // 当主循环无数据可读短暂闲置时，利用 yield 触发排空操作保障低延迟
-            _ = tokio::task::yield_now(), if batched_write.sending_bufs.len() > 0 => {
-                batched_write.flush().await?;
-            }
+        let n = dev.recv(&mut buf).await?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TUN device closed"));
         }
+        socket.send(&buf[..n]).await?;
     }
 }
 
-async fn tcp_to_tun_task(
-    tcp_read: tokio::net::tcp::OwnedReadHalf,
-    writer: Arc<AsyncDevice>,
+async fn udp_to_tun_task(
+    socket: Arc<UdpSocket>,
+    dev: Arc<AsyncDevice>,
+    mut first_pkt: Option<Vec<u8>>,
 ) -> Result<(), std::io::Error> {
-    let mut framed_read = FramedRead::new(tcp_read, PacketCodec);
-    let mut tun_tx = TunTx::new(writer);
-
-    while let Some(res) = framed_read.next().await {
-        let pkt = res?;
-        if let Err(e) = tun_tx.send(pkt) {
-            eprintln!("tun tx error: {:?}", e);
+    // 优先处理服务端在建立连接时缓存的首个数据包
+    if let Some(pkt) = first_pkt.take() {
+        if let Err(e) = dev.try_send(&pkt) {
+            eprintln!("TUN tx error for first packet: {:?}", e);
         }
     }
-    Ok(())
+
+    let mut buf = vec![0u8; BUFFER_SIZE];
+    loop {
+        let n = socket.recv(&mut buf).await?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UDP socket closed"));
+        }
+        if let Err(e) = dev.try_send(&buf[..n]) {
+            if e.kind() != ErrorKind::WouldBlock {
+                eprintln!("TUN tx error: {:?}", e);
+            }
+        }
+    }
 }
 
 fn setup_route(tun_name: &str, target_ip: &str) {
@@ -294,38 +88,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     setup_route(&tun_name, target_ip);
 
-    let stream = if mode == "server" {
-        let listener = TcpListener::bind(addr).await?;
-        println!("TCP Server listening on {}", addr);
-        let (stream, peer) = listener.accept().await?;
-        println!("Accepted connection from {}", peer);
-        stream
+    let (socket, first_pkt) = if mode == "server" {
+        let socket = UdpSocket::bind(addr).await?;
+        println!("UDP Server listening on {}. Waiting for client packet...", addr);
+
+        let mut first_buf = vec![0u8; BUFFER_SIZE];
+        let (n, peer) = socket.recv_from(&mut first_buf).await?;
+        println!("Received packet from peer: {}, establishing point-to-point tunnel", peer);
+
+        socket.connect(peer).await?;
+        (Arc::new(socket), Some(first_buf[..n].to_vec()))
     } else {
-        println!("Connecting to TCP server at {}", addr);
-        let socket = if addr.is_ipv4() {
-            TcpSocket::new_v4()?
+        let local_addr: SocketAddr = if addr.is_ipv4() {
+            "0.0.0.0:0".parse()?
         } else {
-            TcpSocket::new_v6()?
+            "[::]:0".parse()?
         };
-        let _ = socket.set_send_buffer_size(1024 * 1024);
-        let _ = socket.set_recv_buffer_size(1024 * 1024);
-        socket.connect(addr).await?
+        let socket = UdpSocket::bind(local_addr).await?;
+        println!("Connecting to UDP server at {}", addr);
+        socket.connect(addr).await?;
+        (Arc::new(socket), None)
     };
 
-    stream.set_nodelay(true)?;
-    let (tcp_read, tcp_write) = stream.into_split();
-
     println!(
-        "Extreme performance tunnel established between {} and {}",
+        "UDP tunnel established between {} and {}",
         tun_ip, target_ip
     );
 
-    let t1 = tokio::spawn(tun_to_tcp_task(dev.clone(), tcp_write));
-    let t2 = tokio::spawn(tcp_to_tun_task(tcp_read, dev.clone()));
+    let t1 = tokio::spawn(tun_to_udp_task(dev.clone(), socket.clone()));
+    let t2 = tokio::spawn(udp_to_tun_task(socket.clone(), dev.clone(), first_pkt));
 
     tokio::select! {
-        res = t1 => { println!("TUN -> TCP task finished: {:?}", res?); }
-        res = t2 => { println!("TCP -> TUN task finished: {:?}", res?); }
+        res = t1 => { println!("TUN -> UDP task finished: {:?}", res?); }
+        res = t2 => { println!("UDP -> TUN task finished: {:?}", res?); }
     }
 
     Ok(())
